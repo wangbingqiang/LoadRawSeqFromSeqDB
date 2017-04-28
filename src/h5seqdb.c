@@ -56,6 +56,14 @@
     exit(EXIT_FAILURE);\
 } while(0);
 
+/* Independent */
+H5FD_mpio_xfer_t MPI_IO_TRANS_PRO=H5FD_MPIO_INDEPENDENT;
+/* Collective */
+//H5FD_mpio_xfer_t MPI_IO_TRANS_PRO=H5FD_MPIO_COLLECTIVE;
+extern  MPI_Comm comm;
+extern  MPI_Info info;
+extern  int	 mpi_rank;
+int total_read_times=0;
 
 struct H5SeqDB* H5SeqDB_Entity_Create(const char* filename_,
                                       char mode_,
@@ -114,7 +122,10 @@ void open_hdf5_file(struct H5SeqDB* db,
                     const char* filename,
                     hid_t mode){
     /* Property lists. */
-    hid_t fapl = H5P_DEFAULT;
+    /* hid_t fapl = H5P_DEFAULT; */
+    hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);
+    H5Pset_fapl_mpio(fapl, comm, info);
+
     /*hid_t fapl = H5Pcreate(H5P_FILE_ACCESS);*/
     /*H5CHK(fapl)*/
     /*H5Pset_alignment(fapl, blocksize, 0);*/
@@ -180,11 +191,23 @@ void flush_reads(struct H5SeqDB* db){
 
 #ifdef DEBUG
     /*NOTIFY("flushing " << remainder << " reads at offset " << nread)*/
-    fprintf(stderr,"%s : flushing %zu reads at offset %zu \n",PROGNAME,remainder,nread);
+    //fprintf(stderr,"%s : flushing %zu reads at offset %zu \n",PROGNAME,remainder,nread);
 #endif
 
     /* Property lists. */
-    hid_t dxpl = H5P_DEFAULT;
+    /* hid_t dxpl = H5P_DEFAULT;
+    */
+
+    hid_t dxpl = H5Pcreate(H5P_DATASET_XFER);
+    H5Pset_dxpl_mpio(dxpl, MPI_IO_TRANS_PRO);
+     
+
+    /*
+     * To write dataset independently use
+     */
+    //H5Pset_dxpl_mpio(dxpl, H5FD_MPIO_INDEPENDENT); 
+     
+
 
     /* Select. */
     hsize_t offset[2] = { db->nread, 0 };
@@ -255,11 +278,11 @@ void open_datasets(struct H5SeqDB* db,const char* path){
         ERROR_H5LOC("sequence and ID datasets have differend sizes at",db->filename,path)
 
     db->nrecords = sdims[0];
-    fprintf(stderr,"found %zu records at %s : %s\n",db->nrecords,db->filename,path);
+    //fprintf(stderr,"found %zu records at %s : %s\n",db->nrecords,db->filename,path);
 
     db->slen = sdims[1];
     db->ilen = idims[1];
-    fprintf(stderr, "sequence length is %zu , ID length is %zu\n",db->slen , db->ilen );
+    //fprintf(stderr, "sequence length is %zu , ID length is %zu\n",db->slen , db->ilen );
 
     /* Read SeqPack tables from attributes. */
     uint8_t enc[SEQPACK_ENC_SIZE];
@@ -297,9 +320,9 @@ struct H5SeqDB* H5SeqDB_Create(const char* filename,
     char* date;
     register_blosc(&version, &date);
     int threads = omp_get_max_threads();   /*OpenMP*/
-    blosc_set_nthreads(threads);
+    blosc_set_nthreads(1); //
 
-    fprintf(stderr, "%s: using BLOSC %s ( %s ) with %d thread(s)\n",PROGNAME,version,date,threads);
+    //fprintf(stderr, "%s: using BLOSC %s ( %s ) with %d thread(s)\n",PROGNAME,version,date,threads);
 
     if (db->mode == MODE_READ) {
 
@@ -351,6 +374,46 @@ struct H5SeqDB* open_input(const char* filename){
     }
 }
 
+void reset_range(struct H5SeqDB *db){
+    
+    int setc = mpi_rank;
+    size_t total = db->nrecords;
+    int chunk_num;
+    int start_chunk=0;
+    int end_chunk=0;
+    if(total%db->blocksize == 0)
+	chunk_num=total/db->blocksize;
+    else
+	chunk_num=total/db->blocksize+1;
+
+    int m=chunk_num%24;
+    int n=chunk_num/24;
+
+    if(m==0)
+	total_read_times=n;
+    else
+	total_read_times=n+1;
+
+    if(setc<m && setc>=0){
+	start_chunk=setc*(n+1)+1;
+	end_chunk=setc*(n+1)+n+1;
+    }
+    else if(setc>=m && setc<TOTAL_SECTIONS){
+	start_chunk=m*(n+1)+(setc-m)*n+1;
+	end_chunk=m*(n+1)+(setc-m+1)*n;
+    }
+    
+    db->nread=(start_chunk-1)*db->blocksize;
+    if(setc!=TOTAL_SECTIONS-1)
+	db->nrecords=end_chunk*db->blocksize;
+    else if(setc==TOTAL_SECTIONS-1)
+	db->nrecords=db->nrecords;
+
+    
+    //fprintf(stdout,"%d:%d:%d:%zu:%zu\n",setc,start_chunk,end_chunk,db->nread,db->nrecords);
+    return;
+}
+
 void export_block(struct H5SeqDB* db, FILE* f, hsize_t count){
     /* Load the next block. */
     flush_reads(db);
@@ -370,10 +433,52 @@ void export_block(struct H5SeqDB* db, FILE* f, hsize_t count){
 
 void exportFASTQ(struct H5SeqDB* db, FILE* f){
     /* Iterate over the full read blocks. */
+    /* hsize_t nblocks = db->nrecords/ db->blocksize;*/
     hsize_t nblocks = db->nrecords / db->blocksize;
     for (hsize_t i=0; i<nblocks; i++) export_block(db,f, db->blocksize);
 
     /* Export any remaining records. */
     hsize_t remainder = db->nrecords % db->blocksize;
     if (remainder) export_block(db,f, remainder);
+}
+
+
+void exportFASTQ_PARTLY(struct H5SeqDB* db, FILE* f){
+    /* Iterate over the full read blocks. */
+    /* hsize_t nblocks = db->nrecords/ db->blocksize;*/
+    int read_times=0;
+    hsize_t nblocks = (db->nrecords - db->nread )/ db->blocksize;
+    for (hsize_t i=0; i<nblocks; i++) {
+	export_block(db,f, db->blocksize);
+	++read_times;
+    }
+    /* Export any remaining records. */
+    hsize_t remainder = (db->nrecords -db->nread) % db->blocksize;
+    if (remainder) {
+	export_block(db,f, remainder);
+	++read_times;
+    }
+
+    if(MPI_IO_TRANS_PRO==H5FD_MPIO_COLLECTIVE)
+    while(read_times<total_read_times){
+	
+	hid_t dxpl = H5Pcreate(H5P_DATASET_XFER);
+        H5Pset_dxpl_mpio(dxpl, MPI_IO_TRANS_PRO);
+	/*
+	* To write dataset independently use
+	*/
+    //H5Pset_dxpl_mpio(dxpl, H5FD_MPIO_INDEPENDENT); 
+	hsize_t offset[2] = { 0, 0 };
+	hsize_t scount[2] = { 0, 0 };
+        hsize_t icount[2] = { 0, 0 };
+        H5TRY(H5Sselect_hyperslab(db->sspace, H5S_SELECT_SET, offset, NULL, scount, NULL))
+        H5TRY(H5Sselect_hyperslab(db->ispace, H5S_SELECT_SET, offset, NULL, icount, NULL))
+        H5TRY(H5Sselect_hyperslab(db->smemspace, H5S_SELECT_SET, offset, NULL, scount, NULL))
+        H5TRY(H5Sselect_hyperslab(db->imemspace, H5S_SELECT_SET, offset, NULL, icount, NULL))
+        clear_buffers(db);
+        H5TRY(H5Dread(db->sdset, H5T_NATIVE_UINT8, db->smemspace, db->sspace, dxpl, db->pbuf))
+        H5TRY(H5Dread(db->idset, H5T_NATIVE_CHAR, db->imemspace, db->ispace, dxpl, db->ibuf))
+	
+	++read_times;	
+    	}
 }

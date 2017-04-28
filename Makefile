@@ -3,10 +3,11 @@ vpath %.h ./src
 objects = loadseqdb.o h5seqdb.o seqpack.o seq.o \
 		  blosc_filter.o blosc.o blosclz.o shuffle.o
 
- CFLAGS = -Wall -fopenmp
- cc = gcc
-LoadSeqDB : $(objects)
-	cc -lhdf5 -lpthread -fopenmp -I./obj -o LoadSeqDB $(objects); rm ./*.o
+ CFLAGS = -Wall -std=gnu99  -fopenmp -I/HOME/nscc-gz_junrongyang/hdf5/hdf5_parallel/include -I/usr/local/mpi3/include/
+ cc = /usr/local/mpi3/bin/mpicc 
+ 
+MPI_LoadSeqDB : $(objects)
+	/usr/local/mpi3/bin/mpicc -lpthread -lz -lsz -lc -fopenmp -I./obj -o MPI_LoadSeqDB $(objects) -lhdf5
 
 
 loadseqdb.o : h5seqdb.h
@@ -20,4 +21,4 @@ shuffle.o : shuffle.h
 
 .PHONY : clean
 clean : 
-		rm LoadSeqDB $(objects)
+		rm MPI_LoadSeqDB $(objects)

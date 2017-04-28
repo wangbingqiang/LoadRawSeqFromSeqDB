@@ -15,6 +15,9 @@
 #include <hdf5.h>
 /* #include "fastq.h"*/
 
+#define TOTAL_SECTIONS 24
+
+
 static const char MODE_READ = 0x00;
 static const char MODE_TRUNCATE = 0x01;
 static const char MODE_APPEND = 0x02;
@@ -87,10 +90,14 @@ struct H5SeqDB* H5SeqDB_Create(const char* filename, char mode, size_t slen, siz
 
 struct H5SeqDB* open_input(const char* filename);
 
+void reset_range(struct H5SeqDB *db);
+
 void flush_reads(struct H5SeqDB* db);
 
 void export_block(struct H5SeqDB* db, FILE* f, hsize_t count);
 
 void exportFASTQ(struct H5SeqDB* db, FILE* f);
+
+void exportFASTQ_PARTLY(struct H5SeqDB* db, FILE* f);
 
 #endif /*LOADSEQDB_C_H5SEQDB_H*/
